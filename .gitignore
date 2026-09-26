@@ -1,1 +1,25 @@
-student_resource/
+﻿# Large datasets and generated artifacts
+**/artifacts/
+*.tsv
+*.csv
+*.parquet
+
+# Models / embeddings / checkpoints
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+*.pkl
+*.pickle
+*.npy
+*.npz
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs
+*.log
