@@ -1,0 +1,151 @@
+seed: 42
+
+# ---------------------------------------------------------------------------
+# Real student_resource dataset wiring. Edit dataset_train_dir to your local
+# path. dataset_test_dir (the real, unlabeled hackathon test set) is never
+# opened by scripts 00-14 — only scripts/15_score_real_test.py reads it,
+# once, at the very end, for scoring only.
+#
+# Flow:
+#   scripts/13a_adapt_student_data.py  reads dataset_train_dir (real schema)
+#                                       -> writes artifacts/student_data/adapted/
+#                                          (canonical schema, full pool)
+#   scripts/13_split_student_train.py  splits ONLY source1+labels by entity
+#                                       -> artifacts/splits/student_holdout/{dev,heldout_test}/
+#                                          (source2/source3 stay shared, see
+#                                          shared_candidates_dir below)
+#   scripts 03-12 (run_all.py)         run against paths.raw_dir = dev/
+#   scripts/14_evaluate_heldout.py     scores the FROZEN trained pipeline
+#                                       against heldout_test/, once
+# ---------------------------------------------------------------------------
+student_data:
+  dataset_train_dir: "C:\\Users\\tsnvr\\Documents\\ML\\amazon\\AmazonML\\code\\business_entity_resolution\\student_resource\\dataset\\train"
+  dataset_test_dir: "C:\\Users\\tsnvr\\Documents\\ML\\amazon\\AmazonML\\code\\business_entity_resolution\\student_resource\\dataset\\test"
+  adapted_dir: "artifacts/student_data/adapted"
+  split_dir: "artifacts/splits/student_holdout"
+  dev_fraction: 0.5   # "split into two halves" per your instruction; change to 0.8 for a more standard 80/20 dev/test split
+  shared_candidates_dir: "artifacts/student_data/adapted"   # source2.tsv/source3.tsv read from here, not duplicated per split
+
+paths:
+  # Points at the dev half of the real split by default. After running
+  # scripts/13a_adapt_student_data.py and scripts/13_split_student_train.py,
+  # this directory contains dev/source1.tsv + dev/labels.tsv (real data).
+  raw_dir: "artifacts/splits/student_holdout/dev"
+  normalized_dir: "artifacts/normalized"
+  candidates_dir: "artifacts/candidates"
+  features_dir: "artifacts/features"
+  models_dir: "artifacts/models"
+  oof_dir: "artifacts/oof"
+  output_dir: "output"
+
+validation:
+  n_folds: 5
+  group_column: source1_entity_id
+
+# ---------------------------------------------------------------------------
+# Stage A: geographic pre-blocking. This runs BEFORE anything expensive
+# (cheap ranker, semantic retrieval). It is the first, cheapest filter.
+# ---------------------------------------------------------------------------
+geographic_blocking:
+  enabled: true
+  keys: ["country", "state", "city"]          # coarse -> fine; missing keys are skipped, never hard-fail
+  fallback_key: "country"                     # if state/city missing, fall back to broader key
+  max_pool_per_entity: 8000                   # hard cap even after geo blocking, for pathological cities
+
+# ---------------------------------------------------------------------------
+# Stage B: cheap candidate ranking (logistic regression), applied to the
+# geographic pool BEFORE semantic retrieval. Replaces hand-written weights.
+# ---------------------------------------------------------------------------
+cheap_ranker:
+  enabled: true
+  max_pool_after_ranking: 500                 # geo pool -> this size, before semantic retrieval
+  features:
+    - token_overlap
+    - char_ngram_overlap
+    - name_jaro_winkler
+    - address_token_overlap
+    - postal_exact
+    - city_exact
+    - phonetic_match
+  model: logistic_regression
+  min_positive_examples: 20                   # below this, fall back to a fixed-weight heuristic
+
+# ---------------------------------------------------------------------------
+# Stage C: semantic retrieval, applied to the (already-shrunk) ranked pool.
+# embedding_backend is pluggable: "tfidf" runs locally with no external
+# calls; "qwen" is the real target backend but requires model weights this
+# sandbox cannot download. Swap embedding_backend to "qwen" once you have
+# the weights available in your own environment.
+# ---------------------------------------------------------------------------
+semantic_retrieval:
+  enabled: true
+  embedding_backend: "tfidf"          # "tfidf" (default, local) | "qwen" (external, not runnable here)
+  top_k_name: 30
+  top_k_address: 30
+  top_k_combined: 30
+
+lexical_blocking:
+  token:
+    enabled: true
+    top_k: 50
+  char_ngram:
+    enabled: true
+    n_values: [3, 4, 5]
+    top_k: 50
+  phonetic:
+    enabled: true
+    top_k: 30
+  rare_token:
+    enabled: true
+    top_k: 50
+  concatenated_name_address:
+    enabled: true
+    top_k: 30
+
+reciprocal_retrieval:
+  enabled: true
+  top_k: 10
+
+# ---------------------------------------------------------------------------
+# Post-union pruning: final size control before candidate_pairs.tsv is written.
+# ---------------------------------------------------------------------------
+candidate_pruning:
+  enabled: true
+  max_candidates_per_entity: 40
+  min_provenance_count: 1
+
+features:
+  missingness: true
+  contradiction: true
+  uniqueness: true
+  cross_source: true
+  reciprocal_flags: true
+
+pair_model:
+  candidates: ["lightgbm"]        # add "catboost" / "xgboost" if installed
+  primary: "lightgbm"
+
+hard_negative_mining:
+  enabled: true
+  high_score_threshold: 0.80
+  same_name_diff_address:
+    name_sim_min: 0.95
+    address_sim_max: 0.30
+  same_address_diff_name:
+    address_sim_min: 0.95
+    name_sim_max: 0.40
+  weight_range: [2, 5]
+
+calibration:
+  method: "isotonic"   # "none" | "platt" | "isotonic" — kept only if it improves OOF F0.5
+
+entity_model:
+  enabled: true
+  method: "rule"        # "rule" (hand baseline) | "lightgbm" (learned) — compare both, keep the winner
+  singleton_score_gap_low: 0.10   # score_gap below this => weak evidence, lean singleton
+  singleton_best_score_low: 0.50
+
+threshold:
+  sweep_min: 0.05
+  sweep_max: 0.95
+  sweep_step: 0.02
